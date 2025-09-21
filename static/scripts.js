@@ -1,5 +1,5 @@
 /**
- * Advanced Client-side JavaScript for the Research AI Dashboard.
+ * Advanced Client-side JavaScript for the ResearchRaven-AI.
  * Handles user interactions, SSE streaming for progress animations, Markdown rendering,
  * and dynamic content updates.
  */

@@ -1,4 +1,4 @@
-"""Main Flask application for the Research AI Dashboard.
+"""Main Flask application for the ResearchRaven-AI.
 
 This module sets up the Flask server, defines routes for the web interface,
 and integrates with the research agent and database utilities. API keys are
