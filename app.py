@@ -1,16 +1,21 @@
 """Main Flask application for the Research AI Dashboard.
 
 This module sets up the Flask server, defines routes for the web interface,
-and integrates with the research agent and database utilities. It loads API
-keys from a .env file for secure configuration.
+and integrates with the research agent and database utilities. API keys are
+loaded from a .env file for secure configuration. Supports streaming progress
+updates via Server-Sent Events (SSE) for real-time UI animations.
 """
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, Response, jsonify
 from research_agent import ResearchAgent
 from db_utils import init_db, save_report, get_history
 from dotenv import load_dotenv
 import os
 import logging
+from contextlib import contextmanager
+import json
+import sqlite3
+from datetime import datetime
 
 # Configure logging for better debugging
 logging.basicConfig(level=logging.INFO)
@@ -42,6 +47,15 @@ def get_agent():
         agent = ResearchAgent(gemini_key, tavily_key)
     return agent
 
+@contextmanager
+def get_db_connection():
+    """Context manager for database connections."""
+    conn = sqlite3.connect('research.db')
+    try:
+        yield conn
+    finally:
+        conn.close()
+
 @app.route('/')
 def index():
     """Render the main dashboard page.
@@ -53,13 +67,13 @@ def index():
 
 @app.route('/research', methods=['POST'])
 def research():
-    """Handle research query and generate a report.
+    """Handle research query and stream progress updates via SSE.
 
-    Expects a JSON payload with a 'query' field. Uses the ResearchAgent to
-    generate a report and saves it to the database.
+    Expects a JSON payload with a 'query' field. Streams progress messages
+    for real-time UI updates, generates the report, and saves it to the database.
 
     Returns:
-        JSON response: Report content or error message.
+        Streaming response: SSE events with progress and final report.
     """
     data = request.json
     query = data.get('query')
@@ -68,15 +82,71 @@ def research():
         logger.warning("Received empty query in /research endpoint")
         return jsonify({'error': 'Missing query'}), 400
 
-    try:
-        agent = get_agent()
-        report = agent.generate_report(query)
-        save_report(query, report)
-        logger.info(f"Generated report for query: {query}")
-        return jsonify({'report': report})
-    except Exception as e:
-        logger.error(f"Error in /research endpoint: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+    def generate_events():
+        try:
+            agent = get_agent()
+            report = None
+            for progress in agent.generate_report_stream(query):
+                if progress['type'] == 'progress':
+                    yield f"data: {json.dumps(progress)}\n\n"
+                elif progress['type'] == 'report':
+                    report = progress['report']
+                    yield f"data: {json.dumps(progress)}\n\n"
+            
+            if report:
+                with get_db_connection() as conn:
+                    c = conn.cursor()
+                    c.execute("INSERT INTO reports (query, report, timestamp) VALUES (?, ?, ?)",
+                              (query, report, datetime.now().isoformat()))
+                    conn.commit()
+                logger.info(f"Generated and saved report for query: {query}")
+        except Exception as e:
+            error_msg = {'type': 'error', 'message': str(e)}
+            logger.error(f"Error in /research endpoint: {str(e)}")
+            yield f"data: {json.dumps(error_msg)}\n\n"
+
+    return Response(generate_events(), mimetype='text/event-stream')
+
+@app.route('/research-stream', methods=['GET'])
+def research_stream():
+    """Stream research progress for a query via SSE (GET endpoint for EventSource).
+
+    Expects a 'query' parameter in the URL. Streams progress messages
+    and saves the report to the database.
+
+    Returns:
+        Streaming response: SSE events with progress and final report.
+    """
+    query = request.args.get('query')
+
+    if not query:
+        logger.warning("Received empty query in /research-stream endpoint")
+        return jsonify({'error': 'Missing query'}), 400
+
+    def generate_events():
+        try:
+            agent = get_agent()
+            report = None
+            for progress in agent.generate_report_stream(query):
+                if progress['type'] == 'progress':
+                    yield f"data: {json.dumps(progress)}\n\n"
+                elif progress['type'] == 'report':
+                    report = progress['report']
+                    yield f"data: {json.dumps(progress)}\n\n"
+            
+            if report:
+                with get_db_connection() as conn:
+                    c = conn.cursor()
+                    c.execute("INSERT INTO reports (query, report, timestamp) VALUES (?, ?, ?)",
+                              (query, report, datetime.now().isoformat()))
+                    conn.commit()
+                logger.info(f"Generated and saved report for query: {query}")
+        except Exception as e:
+            error_msg = {'type': 'error', 'message': str(e)}
+            logger.error(f"Error in /research-stream endpoint: {str(e)}")
+            yield f"data: {json.dumps(error_msg)}\n\n"
+
+    return Response(generate_events(), mimetype='text/event-stream')
 
 @app.route('/history', methods=['GET'])
 def history():
